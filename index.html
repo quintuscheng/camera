@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vintage & 4K Camera</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body {
+      background: #111;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 16px;
+      gap: 14px;
+    }
+    .viewport {
+      position: relative;
+      width: 100%;
+      max-width: 720px;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #2a2a2a;
+    }
+    video, canvas.preview {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.65);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+    }
+    .controls {
+      width: 100%;
+      max-width: 720px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+    button {
+      background: #222;
+      color: #eee;
+      border: 1px solid #3a3a3a;
+      padding: 8px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: 0.15s;
+    }
+    button:hover { background: #303030; }
+    button.active {
+      background: #f59e0b;
+      color: #111;
+      border-color: #f59e0b;
+      font-weight: 600;
+    }
+    .actions {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      align-items: center;
+    }
+    .shutter {
+      background: #ef4444;
+      color: #fff;
+      border: none;
+      padding: 12px 24px;
+      font-weight: 700;
+      border-radius: 999px;
+    }
+    .shutter:hover { background: #dc2626; }
+    .capture-box {
+      width: 100%;
+      max-width: 720px;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      background: #181818;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid #2a2a2a;
+    }
+    .capture-box img {
+      width: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      border-radius: 8px;
+    }
+    a.download-btn {
+      color: #111;
+      background: #22c55e;
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="viewport">
+    <video id="video" autoplay playsinline muted style="display:none;"></video>
+    <canvas id="liveCanvas" class="preview"></canvas>
+    <div class="hud" id="hud">4K TARGET (3840x2160)</div>
+  </div>
+
+  <div class="controls">
+    <div class="presets" id="presets">
+      <button class="active" data-mode="4k_raw">4K Raw</button>
+      <button data-mode="70s_warm">1970s Warm</button>
+      <button data-mode="90s_faded">1990s Faded</button>
+      <button data-mode="noir_grain">Noir Grain</button>
+      <button data-mode="sepia_retro">Sepia Retro</button>
+    </div>
+
+    <div class="actions">
+      <button id="switchCamBtn">Switch Camera</button>
+      <button class="shutter" id="snapBtn">Take Photo</button>
+    </div>
+  </div>
+
+  <div class="capture-box" id="captureBox">
+    <div id="photoMeta" style="font-size: 13px; color: #bbb;"></div>
+    <img id="photoPreview" alt="Captured photo" />
+    <a id="downloadLink" class="download-btn" download="photo.jpg">Download Image</a>
+  </div>
+
+  <script>
+    const video = document.getElementById("video");
+    const liveCanvas = document.getElementById("liveCanvas");
+    const liveCtx = liveCanvas.getContext("2d");
+    const hud = document.getElementById("hud");
+    const presetsEl = document.getElementById("presets");
+    const snapBtn = document.getElementById("snapBtn");
+    const switchCamBtn = document.getElementById("switchCamBtn");
+    const captureBox = document.getElementById("captureBox");
+    const photoPreview = document.getElementById("photoPreview");
+    const photoMeta = document.getElementById("photoMeta");
+    const downloadLink = document.getElementById("downloadLink");
+
+    let currentMode = "4k_raw";
+    let facingMode = "environment";
+    let stream = null;
+    let grainPattern = null;
+
+    const PRESETS = {
+      "4k_raw":     { label: "4K Raw",      filter: "none", grain: 0,    vignette: 0 },
+      "70s_warm":   { label: "1970s Warm",  filter: "sepia(0.32) contrast(1.08) saturate(1.25)", grain: 14, vignette: 0.35 },
+      "90s_faded":  { label: "1990s Faded", filter: "contrast(0.88) brightness(1.06) saturate(0.85)", grain: 22, vignette: 0.25 },
+      "noir_grain": { label: "Noir Grain",  filter: "grayscale(1) contrast(1.35) brightness(0.95)", grain: 32, vignette: 0.45 },
+      "sepia_retro":{ label: "Sepia Retro", filter: "sepia(0.75) contrast(1.05) brightness(0.96)", grain: 18, vignette: 0.4 }
+    };
+
+    function createGrainPattern(ctx, intensity) {
+      const gCanvas = document.createElement("canvas");
+      gCanvas.width = 128;
+      gCanvas.height = 128;
+      const gCtx = gCanvas.getContext("2d");
+      const imgData = gCtx.createImageData(128, 128);
+      for (let i = 0; i < imgData.data.length; i += 4) {
+        const v = (Math.random() - 0.5) * 2 * intensity;
+        const shade = v > 0 ? 255 : 0;
+        imgData.data[i] = shade;
+        imgData.data[i + 1] = shade;
+        imgData.data[i + 2] = shade;
+        imgData.data[i + 3] = Math.min(255, Math.abs(v) * 2.5);
+      }
+      gCtx.putImageData(imgData, 0, 0);
+      return ctx.createPattern(gCanvas, "repeat");
+    }
+
+    function applyEffects(ctx, width, height, modeKey) {
+      const preset = PRESETS[modeKey];
+      ctx.save();
+      ctx.filter = preset.filter;
+      ctx.drawImage(video, 0, 0, width, height);
+      ctx.filter = "none";
+
+      if (preset.grain > 0) {
+        if (!grainPattern) grainPattern = createGrainPattern(ctx, preset.grain);
+        ctx.save();
+        ctx.translate(Math.random() * 128, Math.random() * 128);
+        ctx.fillStyle = grainPattern;
+        ctx.fillRect(-128, -128, width + 256, height + 256);
+        ctx.restore();
+      }
+
+      if (preset.vignette > 0) {
+        const grad = ctx.createRadialGradient(
+          width / 2, height / 2, Math.min(width, height) * 0.25,
+          width / 2, height / 2, Math.max(width, height) * 0.72
+        );
+        grad.addColorStop(0, "rgba(0,0,0,0)");
+        grad.addColorStop(1, `rgba(0,0,0,${preset.vignette})`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      ctx.restore();
+    }
+
+    async function startCamera() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode,
+            width: { ideal: 3840 },
+            height: { ideal: 2160 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        const w = video.videoWidth || 1920;
+        const h = video.videoHeight || 1080;
+        liveCanvas.width = w;
+        liveCanvas.height = h;
+        hud.textContent = `${PRESETS[currentMode].label} - ${w}x${h}`;
+      } catch (err) {
+        hud.textContent = `Camera error: ${err.message}`;
+      }
+    }
+
+    function renderLoop() {
+      if (video.readyState >= 2) {
+        if (liveCanvas.width !== video.videoWidth || liveCanvas.height !== video.videoHeight) {
+          liveCanvas.width = video.videoWidth;
+          liveCanvas.height = video.videoHeight;
+          hud.textContent = `${PRESETS[currentMode].label} - ${video.videoWidth}x${video.videoHeight}`;
+        }
+        applyEffects(liveCtx, liveCanvas.width, liveCanvas.height, currentMode);
+      }
+      requestAnimationFrame(renderLoop);
+    }
+
+    presetsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      currentMode = btn.dataset.mode;
+      grainPattern = null;
+      presetsEl.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      hud.textContent = `${PRESETS[currentMode].label} - ${video.videoWidth || 0}x${video.videoHeight || 0}`;
+    });
+
+    switchCamBtn.addEventListener("click", () => {
+      facingMode = facingMode === "environment" ? "user" : "environment";
+      startCamera();
+    });
+
+    snapBtn.addEventListener("click", () => {
+      if (!video.videoWidth || !video.videoHeight) return;
+      const snapCanvas = document.createElement("canvas");
+      snapCanvas.width = video.videoWidth;
+      snapCanvas.height = video.videoHeight;
+      const snapCtx = snapCanvas.getContext("2d");
+      applyEffects(snapCtx, snapCanvas.width, snapCanvas.height, currentMode);
+
+      const dataUrl = snapCanvas.toDataURL("image/jpeg", 0.95);
+      photoPreview.src = dataUrl;
+      downloadLink.href = dataUrl;
+      downloadLink.download = `${currentMode}-${Date.now()}.jpg`;
+      photoMeta.textContent = `Captured: ${snapCanvas.width}x${snapCanvas.height} (${PRESETS[currentMode].label})`;
+      captureBox.style.display = "flex";
+    });
+
+    startCamera();
+    renderLoop();
+  </script>
+</body>
+</html>
